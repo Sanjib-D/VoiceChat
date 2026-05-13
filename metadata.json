@@ -1,0 +1,8 @@
+{
+  "name": "OmniChat Pro",
+  "description": "Text chat and voice calling/chatting app with personal and lobby systems",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": []
+}
