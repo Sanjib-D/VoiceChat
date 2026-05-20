@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
 import { CallState, SignalData } from '../types';
 
 const ICE_SERVERS = {
@@ -9,8 +9,7 @@ const ICE_SERVERS = {
   ],
 };
 
-export function useWebRTC(myId: string) {
-  const [socket, setSocket] = useState<Socket | null>(null);
+export function useWebRTC(socket: Socket | null, myId: string) {
   const [callState, setCallState] = useState<CallState>('idle');
   const [remoteId, setRemoteId] = useState<string>('');
   const [callerName, setCallerName] = useState<string>('');
@@ -25,7 +24,7 @@ export function useWebRTC(myId: string) {
   const iceCandidateQueue = useRef<RTCIceCandidateInit[]>([]);
 
   const [isMuted, setIsMuted] = useState(false);
-  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(true); // Default to true now
 
   // Callback refs to instantly attach streams when the video components mount
   const remoteVideoRef = useCallback((node: HTMLVideoElement | null) => {
@@ -42,34 +41,38 @@ export function useWebRTC(myId: string) {
     }
   }, []);
 
-  // Initialize socket
+  // Initialize socket registration
   useEffect(() => {
-    if (!myId) return;
+    if (!myId || !socket) return;
+    
+    socket.emit('register', myId);
 
-    const newSocket = io();
-    setSocket(newSocket);
-
-    newSocket.on('connect', () => {
-      newSocket.emit('register', myId);
-    });
-
-    newSocket.on('registered', (success) => {
+    const handleRegistered = (success: boolean) => {
       if (!success) {
         setError('Failed to register ID on server.');
       }
-    });
-
-    return () => {
-      newSocket.disconnect();
     };
-  }, [myId]);
+    
+    socket.on('registered', handleRegistered);
+    
+    return () => {
+      socket.off('registered', handleRegistered);
+    };
+  }, [myId, socket]);
 
-  // Request media permissions
+  // Request media permissions (default video stream disabled physically)
   const getMediaStream = async () => {
     if (localStream.current) return localStream.current;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStream.current = stream;
+      
+      // Default to video off
+      stream.getVideoTracks().forEach(track => {
+         track.enabled = false;
+      });
+      setIsVideoOff(true);
+
       if (localVideoElement.current) {
         localVideoElement.current.srcObject = stream;
       }
