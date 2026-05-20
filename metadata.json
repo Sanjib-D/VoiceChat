@@ -1,6 +1,0 @@
-{
-  "name": "6-Digit Connect",
-  "description": "A real-time WebRTC calling application that uses 6-digit IDs for easy connection.",
-  "requestFramePermissions": ["camera", "microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
