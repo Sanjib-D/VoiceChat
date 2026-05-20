@@ -1,11 +1,22 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
+import { io, Socket } from "socket.io-client";
 import { useWebRTC } from "./hooks/useWebRTC";
-import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff, PhoneIncoming, AlertCircle } from "lucide-react";
+import { useGroupCall } from "./hooks/useGroupCall";
+import { Phone, PhoneOff, Mic, MicOff, Video, VideoOff, PhoneIncoming, AlertCircle, Users, User } from "lucide-react";
 
 export default function App() {
+  const [socket, setSocket] = useState<Socket | null>(null);
   const [myId, setMyId] = useState<string>("");
   const [myName, setMyName] = useState<string>("");
   const [targetId, setTargetId] = useState<string>("");
+  const [groupRoom, setGroupRoom] = useState<string>("");
+  const [callMode, setCallMode] = useState<"1to1" | "group">("1to1");
+
+  useEffect(() => {
+    const s = io();
+    setSocket(s);
+    return () => { s.disconnect(); };
+  }, []);
 
   useEffect(() => {
     const savedId = localStorage.getItem("webrtc-id");
@@ -42,17 +53,28 @@ export default function App() {
     isMuted,
     toggleVideo,
     isVideoOff
-  } = useWebRTC(myId);
+  } = useWebRTC(socket, myId);
 
-  if (!myId) return <div className="flex h-screen items-center justify-center bg-gray-50"><div className="animate-pulse text-gray-500">Initializing...</div></div>;
+  const {
+    inGroup,
+    groupUsers,
+    joinGroup,
+    leaveGroup,
+    toggleMuteGroup,
+    isMuted: isGroupMuted,
+    groupError,
+    setGroupError
+  } = useGroupCall(socket, myId);
+
+  if (!myId || !socket) return <div className="flex h-screen items-center justify-center bg-gray-50"><div className="animate-pulse text-gray-500">Connecting to server...</div></div>;
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 font-sans text-gray-900">
       
       {/* HEADER / IDENTITY */}
-      {callState === "idle" && (
+      {callState === "idle" && !inGroup && (
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden mb-6 border border-gray-100">
-          <div className="bg-blue-600 p-6 text-white text-center">
+          <div className="bg-blue-600 p-6 text-white text-center flex flex-col">
             <h1 className="text-2xl font-semibold tracking-tight">Connect Online</h1>
             <p className="text-blue-100 mt-1 text-sm">Share your ID to receive calls</p>
           </div>
@@ -75,46 +97,142 @@ export default function App() {
                 className="w-full border border-gray-300 px-4 py-3 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
               />
             </div>
-
-            <div className="pt-4 border-t border-gray-100">
-              <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Make a call</label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  maxLength={6}
-                  value={targetId}
-                  onChange={(e) => setTargetId(e.target.value.replace(/\D/g, ''))}
-                  placeholder="Enter 6-digit ID"
-                  className="flex-1 border border-gray-300 px-4 py-3 rounded-lg font-mono text-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
-                />
-                <button
-                  onClick={() => {
-                    if (targetId.length !== 6) {
-                       setError("Please enter a valid 6-digit ID");
-                       return;
-                    }
-                    startCall(targetId, myName);
-                  }}
-                  disabled={targetId.length !== 6}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium transition-colors flex items-center gap-2"
-                >
-                  <Phone className="w-5 h-5" />
-                  Call
-                </button>
-              </div>
-              {error && (
-                <div className="mt-3 flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
-                  <AlertCircle className="w-4 h-4" />
-                  {error}
-                </div>
-              )}
+            
+            <div className="flex bg-gray-100 p-1 rounded-lg">
+              <button 
+                onClick={() => setCallMode("1to1")}
+                className={`flex-1 py-2 text-sm font-medium rounded-md flex justify-center items-center gap-2 transition-colors ${callMode === "1to1" ? "bg-white shadow text-blue-600" : "text-gray-500 hover:text-gray-900"}`}
+              >
+                <User className="w-4 h-4" /> 1-to-1 Call
+              </button>
+              <button
+                onClick={() => setCallMode("group")}
+                className={`flex-1 py-2 text-sm font-medium rounded-md flex justify-center items-center gap-2 transition-colors ${callMode === "group" ? "bg-white shadow text-blue-600" : "text-gray-500 hover:text-gray-900"}`}
+              >
+                <Users className="w-4 h-4" /> Group Voice
+              </button>
             </div>
+
+            {callMode === "1to1" ? (
+              <div className="pt-2">
+                <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Call someone (Video / Voice)</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={targetId}
+                    onChange={(e) => setTargetId(e.target.value.replace(/\D/g, ''))}
+                    placeholder="Enter 6-digit ID"
+                    className="flex-1 border border-gray-300 px-4 py-3 rounded-lg font-mono text-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  />
+                  <button
+                    onClick={() => {
+                      if (targetId.length !== 6) {
+                         setError("Please enter a valid 6-digit ID");
+                         return;
+                      }
+                      startCall(targetId, myName);
+                    }}
+                    disabled={targetId.length !== 6 || targetId === myId}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium transition-colors flex items-center gap-2"
+                  >
+                    <Phone className="w-5 h-5" />
+                    Call
+                  </button>
+                </div>
+                {error && (
+                  <div className="mt-3 flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
+                    <AlertCircle className="w-4 h-4" />
+                    {error}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="pt-2">
+                <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Join a voice room</label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={groupRoom}
+                    onChange={(e) => setGroupRoom(e.target.value.replace(/\D/g, ''))}
+                    placeholder="Enter 6-digit Room ID"
+                    className="flex-1 border border-gray-300 px-4 py-3 rounded-lg font-mono text-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
+                  />
+                  <button
+                    onClick={() => {
+                      if (groupRoom.length !== 6) {
+                         setGroupError("Please enter a valid 6-digit Room ID");
+                         return;
+                      }
+                      joinGroup(groupRoom);
+                    }}
+                    disabled={groupRoom.length !== 6}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-medium transition-colors flex items-center gap-2"
+                  >
+                    <Users className="w-5 h-5" />
+                    Join
+                  </button>
+                </div>
+                {groupError && (
+                  <div className="mt-3 flex items-center gap-2 text-red-600 text-sm bg-red-50 p-3 rounded-lg">
+                    <AlertCircle className="w-4 h-4" />
+                    {groupError}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* GROUP CALL SCREEN */}
+      {inGroup && (
+        <div className="fixed inset-0 bg-gray-900 z-40 flex flex-col items-center justify-center p-4">
+           {/* Header */}
+          <div className="bg-gray-900/80 backdrop-blur-md p-6 absolute top-0 left-0 right-0 z-10 flex flex-col items-center">
+            <h2 className="text-white text-xl font-medium">
+               Voice Room: {inGroup}
+            </h2>
+            <p className="text-gray-400 text-sm mt-1">
+               {groupUsers.length} other{groupUsers.length !== 1 ? 's' : ''} in room
+            </p>
+          </div>
+          
+          <div className="w-full max-w-2xl mt-20 flex flex-wrap gap-4 items-center justify-center">
+             <div className="w-32 h-32 rounded-full bg-blue-600 flex items-center justify-center shadow-lg border-4 border-gray-800 relative">
+               <span className="text-white font-mono font-bold text-xl">{myId}</span>
+               <div className="absolute bottom-0 bg-gray-900 text-xs text-white px-2 rounded-full transform translate-y-1/2">You</div>
+             </div>
+             {groupUsers.map(id => (
+                <div key={id} className="w-32 h-32 rounded-full bg-gray-800 flex items-center justify-center shadow-lg border-4 border-gray-700 relative animate-in zoom-in duration-300">
+                  <span className="text-gray-300 font-mono font-bold text-xl">{id}</span>
+                </div>
+             ))}
+          </div>
+
+          <div className="bg-gray-900/90 backdrop-blur-xl p-6 pb-10 flex justify-center gap-6 absolute bottom-0 left-0 right-0">
+            <button
+              onClick={toggleMuteGroup}
+              className={`w-16 h-16 rounded-full flex items-center justify-center text-white transition-all ${
+                isGroupMuted ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-800 hover:bg-gray-700'
+              }`}
+            >
+              {isGroupMuted ? <MicOff className="w-7 h-7" /> : <Mic className="w-7 h-7" />}
+            </button>
+            
+            <button
+              onClick={leaveGroup}
+              className="w-20 h-20 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center text-white transition-transform hover:scale-105 active:scale-95 shadow-lg shadow-red-500/20"
+            >
+              <PhoneOff className="w-8 h-8" />
+            </button>
           </div>
         </div>
       )}
 
       {/* INCOMING CALL MODAL */}
-      {callState === "ringing" && (
+      {callState === "ringing" && !inGroup && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl animate-in fade-in zoom-in duration-300">
             <div className="w-20 h-20 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-6 animate-pulse">
