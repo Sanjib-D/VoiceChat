@@ -1,186 +1,286 @@
-import { useEffect, useRef, useState } from 'react';
-import Peer from 'simple-peer';
-import { useAppStore } from '../store/useAppStore';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { io, Socket } from 'socket.io-client';
+import { CallState, SignalData } from '../types';
 
-export function useWebRTC() {
-  const { socket, users } = useAppStore();
-  const [inVoice, setInVoice] = useState(false);
-  const [isMuted, setIsMuted] = useState(true);
-  const [isDeafened, setIsDeafened] = useState(false);
-  
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+  ],
+};
+
+export function useWebRTC(myId: string) {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [callState, setCallState] = useState<CallState>('idle');
+  const [remoteId, setRemoteId] = useState<string>('');
+  const [callerName, setCallerName] = useState<string>('');
+  const [error, setError] = useState<string>('');
+
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+
   const localStream = useRef<MediaStream | null>(null);
-  const peersRef = useRef<{ [socketId: string]: any }>({});
-  // Keeping track of users currently in voice chat
-  const [voiceUsers, setVoiceUsers] = useState<string[]>([]);
-  const audioElements = useRef<{ [socketId: string]: any }>({});
+  const peerConnection = useRef<RTCPeerConnection | null>(null);
 
-  // Helper to destroy all peers
-  const destroyAllPeers = () => {
-    Object.values(peersRef.current).forEach((peer: any) => peer.destroy());
-    peersRef.current = {};
-    Object.values(audioElements.current).forEach((audio: any) => {
-      audio.pause();
-      audio.srcObject = null;
-      if (audio.parentNode) {
-        audio.parentNode.removeChild(audio);
-      }
-    });
-    audioElements.current = {};
-  };
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
 
+  // Initialize socket
   useEffect(() => {
-    if (!socket) return;
+    if (!myId) return;
 
-    socket.on("user-joined-voice", (socketId: string) => {
-      setVoiceUsers(prev => [...prev, socketId]);
-      
-      // If we are in voice, we initiate a peer connection to them
-      if (inVoice && localStream.current) {
-        const peer = new Peer({
-          initiator: true,
-          trickle: false,
-          stream: localStream.current,
-          config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
-        });
+    const newSocket = io();
+    setSocket(newSocket);
 
-        peer.on("signal", signal => {
-          socket.emit("webrtc-signal", { to: socketId, signal });
-        });
-
-        peer.on("stream", stream => {
-          let audio = audioElements.current[socketId];
-          if (!audio) {
-            audio = new Audio();
-            audio.autoplay = true;
-            document.body.appendChild(audio);
-            audioElements.current[socketId] = audio;
-          }
-          audio.srcObject = stream;
-        });
-
-        peersRef.current[socketId] = peer;
-      }
+    newSocket.on('connect', () => {
+      newSocket.emit('register', myId);
     });
 
-    socket.on("user-left-voice", (socketId: string) => {
-      setVoiceUsers(prev => prev.filter(id => id !== socketId));
-      if (peersRef.current[socketId]) {
-        peersRef.current[socketId].destroy();
-        delete peersRef.current[socketId];
+    newSocket.on('registered', (success) => {
+      if (!success) {
+        setError('Failed to register ID on server.');
       }
-      if (audioElements.current[socketId]) {
-        audioElements.current[socketId].pause();
-        if (audioElements.current[socketId].parentNode) {
-          audioElements.current[socketId].parentNode.removeChild(audioElements.current[socketId]);
-        }
-        delete audioElements.current[socketId];
-      }
-    });
-
-    socket.on("webrtc-signal", ({ signal, from }: { signal: any, from: string }) => {
-      // If we're not in voice, we shouldn't care (but really we should check)
-      if (!inVoice) return;
-      
-      let peer = peersRef.current[from];
-      if (!peer) {
-        // We received a signal from an initiator, so we create a responding peer
-        peer = new Peer({
-          initiator: false,
-          trickle: false,
-          stream: localStream.current || undefined,
-          config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
-        });
-
-        peer.on("signal", respSignal => {
-          socket.emit("webrtc-signal", { to: from, signal: respSignal });
-        });
-
-        peer.on("stream", stream => {
-          let audio = audioElements.current[from];
-          if (!audio) {
-            audio = new Audio();
-            audio.autoplay = true;
-            document.body.appendChild(audio);
-            audioElements.current[from] = audio;
-          }
-          audio.srcObject = stream;
-        });
-
-        peersRef.current[from] = peer;
-      }
-      
-      peer.signal(signal);
     });
 
     return () => {
-      socket.off("user-joined-voice");
-      socket.off("user-left-voice");
-      socket.off("webrtc-signal");
-      destroyAllPeers();
+      newSocket.disconnect();
     };
-  }, [socket, inVoice]);
+  }, [myId]);
 
-  // Update muted state of our stream
-  useEffect(() => {
+  // Request media permissions
+  const getMediaStream = async () => {
+    if (localStream.current) return localStream.current;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStream.current = stream;
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      return stream;
+    } catch (err) {
+      console.error("Failed to get local stream", err);
+      setError("Camera/Microphone access denied.");
+      return null;
+    }
+  };
+
+  const stopMediaStream = () => {
     if (localStream.current) {
-      localStream.current.getAudioTracks().forEach(track => {
-        track.enabled = !isMuted;
+      localStream.current.getTracks().forEach((track) => track.stop());
+      localStream.current = null;
+    }
+  };
+
+  // WebRTC Setup
+  const createPeerConnection = useCallback((targetId: string) => {
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+
+    // Add local tracks
+    if (localStream.current) {
+      localStream.current.getTracks().forEach((track) => {
+        pc.addTrack(track, localStream.current!);
       });
     }
-  }, [isMuted]);
 
-  // Update deafened state of remote streams
-  useEffect(() => {
-    Object.values(audioElements.current).forEach((audio: any) => {
-      audio.muted = isDeafened;
-    });
-  }, [isDeafened]);
-
-  const disconnect = () => {
-    if (inVoice) {
-      if (localStream.current) {
-        localStream.current.getTracks().forEach(t => t.stop());
-        localStream.current = null;
-      }
-      destroyAllPeers();
-      setInVoice(false);
-      if (socket) socket.emit("leave-voice");
-    }
-  };
-
-  const toggleVoice = async () => {
-    if (inVoice) {
-      disconnect();
-    } else {
-      // Join voice
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        // Apply default mute
-        stream.getAudioTracks().forEach(track => {
-          track.enabled = !isMuted;
+    pc.onicecandidate = (event) => {
+      if (event.candidate && socket) {
+        socket.emit('signal', {
+          to: targetId,
+          from: myId,
+          type: 'ice-candidate',
+          signal: event.candidate,
         });
-        localStream.current = stream;
-        
-        setInVoice(true);
-        if (socket) socket.emit("join-voice");
-        
-        // Self id to voiceUsers for UI? 
-        // We don't really need our own ID, but let's just make sure others show up.
-      } catch (err) {
-        console.error("Failed to get local stream", err);
-        alert("Failed to access microphone.");
       }
+    };
+
+    pc.ontrack = (event) => {
+      if (remoteVideoRef.current && event.streams[0]) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+        handleEndCall();
+      }
+    };
+
+    peerConnection.current = pc;
+    return pc;
+  }, [myId, socket]);
+
+  // Handle incoming socket signals
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleSignal = async (data: SignalData) => {
+      if (data.type === 'offer') {
+        setRemoteId(data.from);
+        setCallerName(data.callerName || 'Someone');
+        setCallState('ringing');
+        // Store the offer to answer later if accepted.
+        peerConnection.current = new RTCPeerConnection(ICE_SERVERS);
+        await peerConnection.current.setRemoteDescription(new RTCSessionDescription(data.signal));
+      } else if (data.type === 'answer') {
+        if (peerConnection.current) {
+          await peerConnection.current.setRemoteDescription(new RTCSessionDescription(data.signal));
+          setCallState('connected');
+        }
+      } else if (data.type === 'ice-candidate') {
+        if (peerConnection.current && peerConnection.current.remoteDescription) {
+          try {
+            await peerConnection.current.addIceCandidate(new RTCIceCandidate(data.signal));
+          } catch (e) {
+            console.error('Error adding received ice candidate', e);
+          }
+        } else {
+           // Queue candidate or handle edge case if needed. For simplicity we ignore if remoteDescription is missing.
+        }
+      } else if (data.type === 'reject') {
+         setError(`${data.callerName || 'User'} declined the call.`);
+         handleEndCall(false);
+      }
+    };
+
+    socket.on('signal', handleSignal);
+
+    socket.on('call-error', (data) => {
+      setError(data.message);
+      handleEndCall(false);
+    });
+
+    socket.on('call-ended', () => {
+      handleEndCall(false);
+    });
+
+    return () => {
+      socket.off('signal', handleSignal);
+      socket.off('call-error');
+      socket.off('call-ended');
+    };
+  }, [socket, createPeerConnection, myId]);
+
+
+  const startCall = async (targetId: string, myName: string) => {
+    setError('');
+    const stream = await getMediaStream();
+    if (!stream) return;
+
+    setRemoteId(targetId);
+    setCallState('calling');
+
+    const pc = createPeerConnection(targetId);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    socket?.emit('signal', {
+      to: targetId,
+      from: myId,
+      type: 'offer',
+      signal: offer,
+      callerName: myName,
+    });
+  };
+
+  const answerCall = async () => {
+    const stream = await getMediaStream();
+    if (!stream) return;
+
+    if (!peerConnection.current) return;
+
+    // Add tracks to the newly created PC that has the remote offer
+    stream.getTracks().forEach(track => peerConnection.current?.addTrack(track, stream));
+
+    // Also attach ICE candidate handler for answer
+    peerConnection.current.onicecandidate = (event) => {
+      if (event.candidate && socket) {
+        socket.emit('signal', {
+          to: remoteId,
+          from: myId,
+          type: 'ice-candidate',
+          signal: event.candidate,
+        });
+      }
+    };
+    
+    peerConnection.current.ontrack = (event) => {
+      if (remoteVideoRef.current && event.streams[0]) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      }
+    };
+
+
+    const answer = await peerConnection.current.createAnswer();
+    await peerConnection.current.setLocalDescription(answer);
+
+    socket?.emit('signal', {
+      to: remoteId,
+      from: myId,
+      type: 'answer',
+      signal: answer,
+    });
+
+    setCallState('connected');
+  };
+
+  const rejectCall = () => {
+    socket?.emit('signal', {
+      to: remoteId,
+      from: myId,
+      type: 'reject'
+    });
+    handleEndCall(false);
+  };
+
+  const endCall = () => {
+    socket?.emit('end-call', { to: remoteId });
+    handleEndCall(true);
+  };
+
+  const handleEndCall = (isLocalInitiated: boolean = true) => {
+    if (peerConnection.current) {
+      peerConnection.current.close();
+      peerConnection.current = null;
+    }
+    stopMediaStream();
+    setCallState('idle');
+    setRemoteId('');
+  };
+
+  const toggleMute = () => {
+    if (localStream.current) {
+      localStream.current.getAudioTracks().forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsMuted(!isMuted);
     }
   };
+
+  const toggleVideo = () => {
+    if (localStream.current) {
+      localStream.current.getVideoTracks().forEach(track => {
+        track.enabled = !track.enabled;
+      });
+      setIsVideoOff(!isVideoOff);
+    }
+  };
+
 
   return {
-    inVoice,
-    toggleVoice,
+    callState,
+    remoteId,
+    callerName,
+    error,
+    setError,
+    localVideoRef,
+    remoteVideoRef,
+    startCall,
+    answerCall,
+    rejectCall,
+    endCall,
+    toggleMute,
     isMuted,
-    setIsMuted,
-    isDeafened,
-    setIsDeafened,
-    voiceUsers,
-    disconnect
+    toggleVideo,
+    isVideoOff
   };
 }

@@ -1,8 +1,6 @@
 {
-  "name": "OmniChat Pro",
-  "description": "Text chat and voice calling/chatting app with personal and lobby systems",
-  "requestFramePermissions": [
-    "microphone"
-  ],
-  "majorCapabilities": []
+  "name": "6-Digit Connect",
+  "description": "A real-time WebRTC calling application that uses 6-digit IDs for easy connection.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
