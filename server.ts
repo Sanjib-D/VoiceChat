@@ -10,7 +10,8 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true }, // Simple setup, normally hash passwords
   userId: { type: String, unique: true }, // 5-digit user ID
-  friends: { type: [String], default: [] } // List of friend userIds
+  friends: { type: [String], default: [] }, // List of friend userIds
+  friendRequests: { type: [String], default: [] } // List of incoming friend request userIds
 });
 const User = mongoose.model('User', userSchema);
 
@@ -20,6 +21,7 @@ interface MockUser {
   password?: string;
   userId: string;
   friends: string[]; // List of friend userIds
+  friendRequests: string[]; // List of incoming friend request userIds
 }
 const mockUsers = new Map<string, MockUser>();
 
@@ -39,7 +41,7 @@ async function startServer() {
     console.log("No MONGODB_URI provided, skipping MongoDB connection.");
   }
   
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
   const server = http.createServer(app);
   
   const io = new Server(server, {
@@ -237,9 +239,9 @@ async function startServer() {
       if (Array.from(mockUsers.values()).some(u => u.username === username)) {
         return res.status(400).json({ success: false, message: "Username taken" });
       }
-      const newUser = { username, password, userId, friends: [] };
+      const newUser = { username, password, userId, friends: [], friendRequests: [] };
       mockUsers.set(userId, newUser);
-      return res.json({ success: true, username, userId, friends: [] });
+      return res.json({ success: true, username, userId, friends: [], friendRequests: [] });
     }
     
     try {
@@ -257,47 +259,162 @@ async function startServer() {
 
     if (!process.env.MONGODB_URI) {
       const currentUser = mockUsers.get(currentUserId);
-      const friendUser = mockUsers.get(friendId);
+      
+      // Look up friendUser by exact userId or username
+      let friendUser = mockUsers.get(friendId);
+      if (!friendUser) {
+        // Try searching by username
+        friendUser = Array.from(mockUsers.values()).find(u => u.username === friendId);
+      }
       
       if (!currentUser || !friendUser) {
         return res.status(404).json({ success: false, message: "User not found" });
       }
-      
-      if (currentUser.friends.includes(friendId)) {
-        return res.status(400).json({ success: false, message: "Already friends" });
+
+      if (currentUser.userId === friendUser.userId) {
+        return res.status(400).json({ success: false, message: "Cannot add yourself" });
       }
       
-      currentUser.friends.push(friendId);
-      // bi-directional
-      friendUser.friends.push(currentUserId);
+      if (currentUser.friends.includes(friendUser.userId)) {
+        return res.status(400).json({ success: false, message: "Already friends" });
+      }
+
+      if (friendUser.friendRequests.includes(currentUser.userId)) {
+        return res.status(400).json({ success: false, message: "Request already sent" });
+      }
       
-      return res.json({ success: true, friends: currentUser.friends });
+      friendUser.friendRequests.push(currentUser.userId);
+      return res.json({ success: true, message: "Friend request sent!" });
     }
     
     try {
       const currentUser = await User.findOne({ userId: currentUserId });
-      const friendUser = await User.findOne({ userId: friendId });
+      
+      // Look up friendUser by exact userId or username
+      let friendUser = await User.findOne({ userId: friendId });
+      if (!friendUser) {
+        friendUser = await User.findOne({ username: friendId });
+      }
       
       if (!currentUser || !friendUser) {
         return res.status(404).json({ success: false, message: "User not found" });
       }
+
+      if (currentUser.userId === friendUser.userId) {
+        return res.status(400).json({ success: false, message: "Cannot add yourself" });
+      }
       
-      // Add friendId to currentUser's friends array if not exists
+      if (!currentUser.friends) currentUser.friends = [];
+      if (!friendUser.friendRequests) friendUser.friendRequests = [];
+
+      if (currentUser.friends.includes(friendUser.userId)) {
+        return res.status(400).json({ success: false, message: "Already friends" });
+      }
+
+      if (friendUser.friendRequests.includes(currentUserId)) {
+         return res.status(400).json({ success: false, message: "Request already sent" });
+      }
+
+      friendUser.friendRequests.push(currentUserId);
+      await friendUser.save();
+      
+      return res.json({ success: true, message: "Friend request sent!" });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  });
+
+  app.get("/api/friends/requests/:userId", async (req, res) => {
+    const { userId } = req.params;
+
+    if (!process.env.MONGODB_URI) {
+      const user = mockUsers.get(userId);
+      if (!user) return res.status(404).json({ success: false, message: "Not found" });
+      
+      const requests = user.friendRequests.map(fId => {
+        const f = mockUsers.get(fId);
+        return { userId: f?.userId, username: f?.username };
+      });
+      return res.json({ success: true, friendRequests: requests });
+    }
+    
+    try {
+      const user = await User.findOne({ userId });
+      if (!user) return res.status(404).json({ success: false, message: "Not found" });
+      
+      if (!user.friendRequests) user.friendRequests = [];
+
+      const requesters = await User.find({ userId: { $in: user.friendRequests } });
+      const requests = requesters.map(f => ({ userId: f.userId, username: f.username }));
+      
+      return res.json({ success: true, friendRequests: requests });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  });
+
+  app.post("/api/friends/accept", async (req, res) => {
+    const { currentUserId, friendId } = req.body;
+
+    if (!process.env.MONGODB_URI) {
+      const currentUser = mockUsers.get(currentUserId);
+      const friendUser = mockUsers.get(friendId);
+      
+      if (!currentUser || !friendUser) return res.status(404).json({ success: false, message: "User not found" });
+
+      if (currentUser.friendRequests.includes(friendId)) {
+        currentUser.friendRequests = currentUser.friendRequests.filter(id => id !== friendId);
+        if (!currentUser.friends.includes(friendId)) currentUser.friends.push(friendId);
+        if (!friendUser.friends.includes(currentUserId)) friendUser.friends.push(currentUserId);
+        return res.json({ success: true });
+      }
+      return res.status(400).json({ success: false, message: "No request found" });
+    }
+
+    try {
+      const currentUser = await User.findOne({ userId: currentUserId });
+      const friendUser = await User.findOne({ userId: friendId });
+
+      if (!currentUser || !friendUser) return res.status(404).json({ success: false, message: "User not found" });
+
+      if (!currentUser.friendRequests) currentUser.friendRequests = [];
       if (!currentUser.friends) currentUser.friends = [];
       if (!friendUser.friends) friendUser.friends = [];
 
-      if (!currentUser.friends.includes(friendId)) {
-        currentUser.friends.push(friendId);
+      if (currentUser.friendRequests.includes(friendId)) {
+        currentUser.friendRequests = currentUser.friendRequests.filter(id => id !== friendId);
+        if (!currentUser.friends.includes(friendId)) currentUser.friends.push(friendId);
+        if (!friendUser.friends.includes(currentUserId)) friendUser.friends.push(currentUserId);
+        
         await currentUser.save();
-      } else {
-        return res.status(400).json({ success: false, message: "Already friends" });
-      }
-      if (!friendUser.friends.includes(currentUserId)) {
-        friendUser.friends.push(currentUserId);
         await friendUser.save();
+        return res.json({ success: true });
       }
-      
-      return res.json({ success: true, friends: currentUser.friends });
+      return res.status(400).json({ success: false, message: "No request found" });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  });
+
+  app.post("/api/friends/reject", async (req, res) => {
+    const { currentUserId, friendId } = req.body;
+
+    if (!process.env.MONGODB_URI) {
+      const currentUser = mockUsers.get(currentUserId);
+      if (!currentUser) return res.status(404).json({ success: false, message: "User not found" });
+
+      currentUser.friendRequests = currentUser.friendRequests.filter(id => id !== friendId);
+      return res.json({ success: true });
+    }
+
+    try {
+      const currentUser = await User.findOne({ userId: currentUserId });
+      if (!currentUser) return res.status(404).json({ success: false, message: "User not found" });
+
+      if (!currentUser.friendRequests) currentUser.friendRequests = [];
+      currentUser.friendRequests = currentUser.friendRequests.filter(id => id !== friendId);
+      await currentUser.save();
+      return res.json({ success: true });
     } catch (err) {
       return res.status(500).json({ success: false, message: "Server error" });
     }

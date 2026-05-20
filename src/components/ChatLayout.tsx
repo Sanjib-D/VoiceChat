@@ -14,6 +14,8 @@ export function ChatLayout() {
   const [inputId, setInputId] = useState('');
   const [inputPass, setInputPass] = useState('');
   const [friendIdToAdd, setFriendIdToAdd] = useState('');
+  const [friendRequests, setFriendRequests] = useState<{userId: string, username: string}[]>([]);
+  const [friendSearchQuery, setFriendSearchQuery] = useState('');
 
   const {
     inVoice,
@@ -68,6 +70,12 @@ export function ChatLayout() {
       if (data.success) {
         setFriends(data.friends);
       }
+      
+      const reqRes = await fetch(`/api/friends/requests/${userId}`);
+      const reqData = await reqRes.json();
+      if (reqData.success) {
+        setFriendRequests(reqData.friendRequests);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -101,10 +109,39 @@ export function ChatLayout() {
     }
   };
 
+  const handleAcceptRequest = async (friendId: string) => {
+    try {
+      const res = await fetch('/api/friends/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentUserId: userId, friendId })
+      });
+      const data = await res.json();
+      if (data.success) fetchFriends();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleRejectRequest = async (friendId: string) => {
+    try {
+      const res = await fetch('/api/friends/reject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentUserId: userId, friendId })
+      });
+      const data = await res.json();
+      if (data.success) fetchFriends();
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const startChatWithFriend = (friendId: string) => {
-    if (!socket) return;
+    if (!socket || !userId) return;
     setError(null);
-    socket.emit('join-room', { roomId: friendId, username, action: 'personal' });
+    const dmRoomId = [userId, friendId].sort().join('-');
+    socket.emit('join-room', { roomId: dmRoomId, username, action: 'personal' });
   };
 
   const handleJoinAction = (e: React.FormEvent) => {
@@ -221,18 +258,50 @@ export function ChatLayout() {
           )}
           
           {activeTab === 'personal' && !isInRoom && (
-            <div className="mt-4 px-2">
-              <h4 className="text-[11px] font-bold uppercase text-[#949BA4] mb-2">Friends</h4>
-              {friends.length === 0 ? (
-                <div className="text-xs text-[#949BA4] italic text-center py-4">No friends yet. Add them by their 5-digit ID!</div>
-              ) : (
-                friends.map((friend, i) => (
-                  <div key={i} onClick={() => startChatWithFriend(friend.userId)} className="flex items-center space-x-2 px-2 py-1.5 rounded hover:bg-[#3F4147] cursor-pointer text-[#DBDEE1] mb-1">
-                    <img src={`https://api.dicebear.com/7.x/initials/svg?seed=${friend.username}`} alt="Avatar" className="w-6 h-6 rounded-full" />
-                    <span className="text-[15px] truncate text-white flex-1">{friend.username}</span>
-                  </div>
-                ))
+            <div className="mt-4 px-2 space-y-4">
+              {friendRequests.length > 0 && (
+                <div>
+                  <h4 className="text-[11px] font-bold uppercase text-[#949BA4] mb-2">Friend Requests</h4>
+                  {friendRequests.map((req, i) => (
+                    <div key={i} className="flex items-center space-x-2 px-2 py-1.5 rounded bg-[#2B2D31] text-[#DBDEE1] mb-1">
+                      <img src={`https://api.dicebear.com/7.x/initials/svg?seed=${req.username}`} alt="Avatar" className="w-6 h-6 rounded-full" />
+                      <span className="text-[14px] truncate text-white flex-1">{req.username}</span>
+                      <div className="flex space-x-1">
+                        <button onClick={() => handleAcceptRequest(req.userId)} className="text-green-500 hover:bg-green-500 hover:text-white p-1 rounded-full bg-[#1E1F22] transition-colors" title="Accept">✓</button>
+                        <button onClick={() => handleRejectRequest(req.userId)} className="text-[#F23F42] hover:bg-[#F23F42] hover:text-white p-1 rounded-full bg-[#1E1F22] transition-colors" title="Reject">✕</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
+
+              <div>
+                <h4 className="text-[11px] font-bold uppercase text-[#949BA4] mb-2">Friends</h4>
+                <div className="mb-2">
+                  <input
+                    type="text"
+                    value={friendSearchQuery}
+                    onChange={(e) => setFriendSearchQuery(e.target.value)}
+                    placeholder="Search by ID or name..."
+                    className="w-full bg-[#1E1F22] text-[#DBDEE1] text-[13px] px-2 py-1.5 rounded focus:outline-none focus:ring-1 focus:ring-[#5865F2]"
+                  />
+                </div>
+                {friends.length === 0 ? (
+                  <div className="text-xs text-[#949BA4] italic text-center py-4">No friends yet. Add them by their Username or 5-digit ID!</div>
+                ) : (
+                  friends
+                    .filter(f => f.username.toLowerCase().includes(friendSearchQuery.toLowerCase()) || f.userId.includes(friendSearchQuery))
+                    .map((friend, i) => (
+                    <div key={i} onClick={() => startChatWithFriend(friend.userId)} className="flex items-center space-x-2 px-2 py-1.5 rounded hover:bg-[#3F4147] cursor-pointer text-[#DBDEE1] mb-1">
+                      <img src={`https://api.dicebear.com/7.x/initials/svg?seed=${friend.username}`} alt="Avatar" className="w-6 h-6 rounded-full" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[14px] truncate text-white leading-tight">{friend.username}</div>
+                        <div className="text-[11px] text-[#949BA4] truncate">ID: {friend.userId}</div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
           )}
 
@@ -319,15 +388,14 @@ export function ChatLayout() {
 
                 <div>
                   <label className="block text-xs font-bold text-[#b5bac1] uppercase mb-2 tracking-wide">
-                    {activeTab === 'personal' ? "Friend's 5-Digit ID" : "Lobby ID"}
+                    {activeTab === 'personal' ? "Friend's Username or ID" : "Lobby ID"}
                   </label>
                   <input
                     type="text"
                     value={activeTab === 'personal' ? friendIdToAdd : inputId}
                     onChange={(e) => activeTab === 'personal' ? setFriendIdToAdd(e.target.value) : setInputId(e.target.value)}
                     className="w-full bg-[#1E1F22] text-[#DBDEE1] px-3 py-2.5 rounded focus:outline-none focus:ring-2 focus:ring-[#5865F2]"
-                    placeholder={activeTab === 'personal' ? 'e.g. 12345' : 'Enter Lobby ID'}
-                    maxLength={activeTab === 'personal' ? 5 : undefined}
+                    placeholder={activeTab === 'personal' ? 'e.g. Username or 12345' : 'Enter Lobby ID'}
                   />
                 </div>
 
